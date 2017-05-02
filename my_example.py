@@ -2,6 +2,7 @@ from abc import ABCMeta, abstractmethod
 from typing import List
 from injector import Module, Key, provider, Injector, inject, singleton
 import sqlite3
+import redis
 
 class User(object):
     def __init__(self, user_id=None, name=None):
@@ -119,6 +120,39 @@ class SQLiteUserRepository(UserRepositoryInterface):
         self.__conn.commit()
         return User(cursor.lastrowid, user.name)
 
+class RedisUserRepository(UserRepositoryInterface):
+
+    def __init__(self, configuration: Configuration):
+        self.__r = redis.Redis(host='localhost', port=6379, db=0)
+
+    def find_by_name(self, name) -> User:
+        for i, raw in enumerate(reversed(self.__r.lrange(name='user', start=0, end=-1))):
+            if  raw.decode('utf-8') == name:
+                return User(i+1, name)
+
+        return []
+
+    def all(self) -> List[User]:
+        fetched = self.__r.lrange(name='user', start=0, end=-1)
+        users = []
+        for i, f in enumerate(reversed(fetched)):
+            users.append(User(i+1, f.decode('utf-8')))
+        return users
+
+    def create(self, user: User) -> User:
+        i = self.__r.lpush('user', user.name.encode('utf-8'))
+        return User(i, User.name)
+
+    def update(self, user: User) -> User:
+        index = self.__r.llen('user') - user.user_id
+        row = self.__r.lindex('user', index)
+        if  row is not None:
+            self.__r.lset('user', index, user.name.encode('utf-8'))
+            return user
+
+    def flush(self):
+        self.__r.flushall()
+
 class RequestHandler(object):
     @inject
     def __init__(self, uer_repository: UserRepositoryInterface):
@@ -135,6 +169,7 @@ class RequestHandler(object):
             print(i)
         user2_2 = self.__user_repository.find_by_name(user2.name)
         print(user2_2)
+        self.__user_repository.flush()
 
 def configure_for_testing(binder):
     configuration = {'db_connection_string': ':memory:'}
@@ -145,7 +180,7 @@ class ServiceProvider(Module):
     @singleton
     @provider
     def register(self, configuration: Configuration) -> UserRepositoryInterface:
-        return SQLiteUserRepository(configuration)
+        return RedisUserRepository(configuration)
 
 if __name__ == "__main__":
     injector = Injector([configure_for_testing, ServiceProvider()])
